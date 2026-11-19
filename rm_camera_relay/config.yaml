@@ -13,7 +13,8 @@ auth_api: false
 host_network: true
 map:
   - ssl:ro
-watchdog: http://127.0.0.1:8099/healthz
+# Supervisor's [HOST] watchdog targets a host-network address, not loopback.
+# Omit the application watchdog; retain the local /healthz endpoint.
 options:
   rm_grant_public_jwk: ""
   relay_private_jwk_file: /ssl/rm-camera-relay-private.jwk
