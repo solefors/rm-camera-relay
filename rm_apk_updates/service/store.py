@@ -10,6 +10,15 @@ from pathlib import Path
 
 CHUNK = 2 * 1024 * 1024
 APK_BASE = 'https://ha.msdev.bid/local/apk/'
+# Plain names only: no path separators, hidden files or the managed update manifest.
+FILE_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
+RESERVED = {'app-update.json'}
+
+def valid_file_name(name):
+    # Versioned rmlarm-<sha256>.apk files back published manifests and must stay immutable.
+    if not isinstance(name, str) or not FILE_NAME.fullmatch(name) or name in RESERVED or name.endswith(('.part', '.tmp')) or re.fullmatch(r'rmlarm-[a-f0-9]{64}\.apk', name):
+        raise Fault('Ogiltigt filnamn. Använd bokstäver, siffror, punkt, bindestreck eller understreck. app-update.json hanteras av publiceringen.')
+    return name
 
 class Fault(Exception):
     def __init__(self, message, status=400):
@@ -66,7 +75,7 @@ class Store:
         return max(0, free - reserved)
 
     def create(self, user, data):
-        if set(data) != {'size', 'sha256', 'versionCode', 'versionName', 'message'}: raise Fault('Ogiltiga metadata.')
+        if not isinstance(data, dict) or set(data) != {'size', 'sha256', 'versionCode', 'versionName', 'message'}: raise Fault('Ogiltiga metadata.')
         if type(data['size']) is not int or not 0 < data['size'] <= 2**53-1: raise Fault('Ogiltig filstorlek.')
         if not isinstance(data['sha256'], str) or not re.fullmatch('[a-f0-9]{64}', data['sha256']): raise Fault('Ogiltig kontrollsumma.')
         if type(data['versionCode']) is not int or not 0 < data['versionCode'] <= 2**31-1: raise Fault('Ogiltig versionskod.')
@@ -75,7 +84,7 @@ class Store:
         # A selected file can resume after reload; no bearer or secret is persisted.
         for path in self.parts.glob('*.json'):
             m = json.loads(path.read_text())
-            if m['user'] == user and all(m[k] == data[k] for k in data):
+            if m.get('kind') != 'file' and m['user'] == user and all(m.get(k) == data[k] for k in data):
                 if m['state'] == 'uploading': return self.status(m)
                 manifest = self.root / 'app-update.json'
                 if manifest.exists():
@@ -87,6 +96,38 @@ class Store:
         m = dict(data, id=ident, user=user, state='uploading')
         (self.parts / (ident + '.part')).touch(mode=0o600)
         atomic_json(self.parts / (ident + '.json'), m)
+        return self.status(m)
+
+    def create_file(self, user, data):
+        if not isinstance(data, dict) or set(data) != {'name', 'size', 'sha256'}: raise Fault('Ogiltiga metadata.')
+        name = valid_file_name(data['name'])
+        if type(data['size']) is not int or not 0 < data['size'] <= 2**53-1: raise Fault('Ogiltig filstorlek.')
+        if not isinstance(data['sha256'], str) or not re.fullmatch('[a-f0-9]{64}', data['sha256']): raise Fault('Ogiltig kontrollsumma.')
+        for path in self.parts.glob('*.json'):
+            m = json.loads(path.read_text())
+            if m.get('kind') == 'file' and m['user'] == user and m['state'] == 'uploading' and all(m[k] == data[k] for k in data): return self.status(m)
+        if data['size'] > self.space(): raise Fault('Otillräckligt diskutrymme på Home Assistant.', 507)
+        ident = str(uuid.uuid4())
+        m = dict(data, name=name, id=ident, user=user, state='uploading', kind='file')
+        (self.parts / (ident + '.part')).touch(mode=0o600)
+        atomic_json(self.parts / (ident + '.json'), m)
+        return self.status(m)
+
+    def finish_file(self, m):
+        if m['state'] == 'complete': return self.status(m)
+        path = self.parts / (m['id'] + '.part')
+        if path.stat().st_size != m['size']: raise Fault('Filen är inte fullständigt uppladdad.', 409)
+        with path.open('rb') as file: actual = hashlib.file_digest(file, 'sha256').hexdigest()
+        if actual != m['sha256']: raise Fault('Kontrollsumman stämmer inte. Välj rätt fil och försök igen.')
+        target = self.root / valid_file_name(m['name'])
+        os.chmod(path, 0o644)
+        # Same filesystem: one rename replaces any existing file atomically; readers see old or new, never partial.
+        os.replace(path, target)
+        fd = os.open(self.root, os.O_RDONLY)
+        try: os.fsync(fd)
+        finally: os.close(fd)
+        m['state'] = 'complete'
+        atomic_json(self.parts / (m['id'] + '.json'), m)
         return self.status(m)
 
     def status(self, m):
@@ -104,6 +145,7 @@ class Store:
         return self.status(m)
 
     def finish(self, m):
+        if m.get('kind') == 'file': raise Fault('Fel uppladdningstyp.', 409)
         if m['state'] == 'complete': return self.status(m)
         path = self.parts / (m['id'] + '.part')
         if path.stat().st_size != m['size']: raise Fault('APK-filen är inte fullständigt uppladdad.', 409)

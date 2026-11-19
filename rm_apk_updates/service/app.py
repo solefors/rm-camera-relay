@@ -7,7 +7,18 @@ from .store import Store, Fault, CHUNK
 AUTH = 'https://rm-larm-styrning.lovable.app/api/public/apk-admin'
 ORIGINS = {'https://rm-larm-styrning.lovable.app', 'https://www.msdev.bid', 'https://msdev.bid', 'https://id-preview--cbf4c4d7-d235-4a5d-838d-6b5ca8d69616.lovable.app'}
 
-def app_for(store, authorize):
+# HA Supervisor's ingress proxy; with ingress the browser never reaches this container directly.
+INGRESS_PEER = '172.30.32.2'
+
+async def bounded_json(request):
+    body = bytearray()
+    async for part in request.content.iter_chunked(8192):
+        body.extend(part)
+        if len(body) > 8192: raise Fault('Ogiltiga metadata.')
+    try: return json.loads(body)
+    except ValueError: raise Fault('Ogiltiga metadata.') from None
+
+def app_for(store, authorize, peers=None):
     lock = asyncio.Lock()
     @web.middleware
     async def gate(request, handler):
@@ -18,8 +29,11 @@ def app_for(store, authorize):
             headers.update({'Access-Control-Allow-Origin': origin, 'Vary': 'Origin', 'Access-Control-Allow-Methods': 'GET, POST, PATCH, OPTIONS', 'Access-Control-Allow-Headers': 'Authorization, Content-Type, Upload-Offset', 'Access-Control-Max-Age': '600'})
         if request.method == 'OPTIONS': return web.Response(status=204, headers=headers)
         try:
+            if peers is not None and request.remote not in peers: raise Fault('Endast Home Assistant-ingress är tillåten.', 403)
             if request.path != '/healthz':
-                bearer = request.headers.get('Authorization', '')
+                # Ingress may not forward Authorization; the RM relay also sends the opaque permission here.
+                permission = request.headers.get('X-RM-Permission', '')
+                bearer = 'Bearer ' + permission if permission else request.headers.get('Authorization', '')
                 if not bearer.startswith('Bearer rmapk.') or len(bearer) > 16400: raise Fault('Kortlivad uppladdningsbehörighet krävs.', 401)
                 request['user'] = await authorize(bearer)
             response = await handler(request)
@@ -32,9 +46,16 @@ def app_for(store, authorize):
     async def space(request):
         async with lock: return web.json_response({'availableBytes': await asyncio.to_thread(store.space), 'packageName': store.package})
     async def create(request):
-        if request.content_length is None or request.content_length > 8192: raise Fault('Ogiltiga metadata.')
-        data = await request.json()
+        data = await bounded_json(request)
         async with lock: return web.json_response(await asyncio.to_thread(store.create, request['user'], data))
+    async def create_file(request):
+        data = await bounded_json(request)
+        async with lock: return web.json_response(await asyncio.to_thread(store.create_file, request['user'], data))
+    async def finish_file(request):
+        async with lock:
+            m = store.metadata(request.match_info['id'], request['user'])
+            if m.get('kind') != 'file': raise Fault('Fel uppladdningstyp.', 409)
+            return web.json_response(await asyncio.to_thread(store.finish_file, m))
     async def status(request):
         async with lock: return web.json_response(store.status(store.metadata(request.match_info['id'], request['user'])))
     async def chunk(request):
@@ -52,7 +73,8 @@ def app_for(store, authorize):
         async with lock:
             m = store.metadata(request.match_info['id'], request['user'])
             return web.json_response(await asyncio.to_thread(store.finish, m))
-    app.add_routes([web.get('/healthz', health), web.get('/v1/apk/space', space), web.post('/v1/apk/uploads', create), web.get('/v1/apk/uploads/{id}', status), web.patch('/v1/apk/uploads/{id}', chunk), web.post('/v1/apk/uploads/{id}/finish', finish)])
+    app.add_routes([web.get('/healthz', health), web.get('/v1/apk/space', space), web.post('/v1/apk/uploads', create), web.get('/v1/apk/uploads/{id}', status), web.patch('/v1/apk/uploads/{id}', chunk), web.post('/v1/apk/uploads/{id}/finish', finish),
+        web.get('/v1/files/space', space), web.post('/v1/files/uploads', create_file), web.get('/v1/files/uploads/{id}', status), web.patch('/v1/files/uploads/{id}', chunk), web.post('/v1/files/uploads/{id}/finish', finish_file)])
     return app
 
 async def main():
@@ -69,10 +91,10 @@ async def main():
                 if response.status != 200: raise Fault('RM-behörigheten kunde inte verifieras.', 503)
                 value = await response.json()
                 return value['userId']
-        runner = web.AppRunner(app_for(store, authorize), access_log=None)
+        runner = web.AppRunner(app_for(store, authorize, {INGRESS_PEER}), access_log=None)
         await runner.setup()
         await web.TCPSite(runner, '0.0.0.0', 8100).start()
-        print('RM APK listening on internal container port 8100; expose only /v1/apk via Cloudflare Tunnel HTTPS.', flush=True)
+        print('RM APK listening on internal port 8100 for Home Assistant ingress only.', flush=True)
         await asyncio.Event().wait()
 if __name__ == '__main__':
     try: asyncio.run(main())

@@ -1,70 +1,42 @@
-# RM APK och appuppdateringar 0.2.0 – publik HTTPS
+# RM APK och appuppdateringar 0.3.0 – uppladdning via befintliga ha.msdev.bid
 
-Uppladdningen använder **https://ha.msdev.bid/v1/apk/** via Cloudflare Tunnel; klienten behöver inte Tailscale. Videor, kamerareserv, HA-webbsidan och Androids befintliga uppdateringsflöde ändras inte.
+Webbläsaren (dator eller mobil) laddar upp till RM-appen. RM-servern kontrollerar att du är aktiv, godkänd administratör och skickar filen vidare i delar om 2 MiB till detta tillägg genom **Home Assistants egen ingress** på den befintliga adressen `https://ha.msdev.bid`. Ingen Tailscale, ingen Android-app och **ingen ändring av Cloudflared/Cloudflare** behövs. Kameraflödet ändras inte.
 
-## Installera separat HA-app
+## Varför `/v1/apk/space` gav 404
 
-1. Använd tilläggsrepot https://github.com/solefors/rm-camera-relay (endast tilläggskod, inte privata RM-apprepot). Kör `ha store reload` och installera **RM APK och appuppdateringar**, version **0.2.0**. Om APK-appen ännu inte syns måste dess mapp först publiceras i repot; koden finns också under projektets `ha-addons/rm_apk_updates` och kan installeras lokalt via `/addons/rm_apk_updates`.
-2. Ange APK:ns verkliga `package_name`. Standard `com.example.rmdckentreprenadab` kommer från befintliga tester; kontrollera mot riktig APK.
-3. Starta. Tillägget lyssnar på **0.0.0.0:8100 inne i sin container**, utan host_network eller publicerad värdport. Cloudflared måste nå samma HA-container-nätverk. Ingen Tailscale-port används.
-4. HA-konfigurationen monteras i tillägget som `/homeassistant`. **HA Core /config/www/apk motsvarar /local/apk/**. `/config/www/local/apk` skulle ge `/local/local/apk/`, därför används `/config/www/apk` för att behålla den befintliga adressen. Kontometadata/temporärfiler finns bara i `/homeassistant/.rm-apk-uploads`, utanför www.
+Cloudflared-tillägget (lokalt hanterad tunnel) bygger sin tunnelkonfiguration från tilläggsinställningarna: först en regel `ha.msdev.bid → Home Assistant`, sedan `additional_hosts`. Schemat tillåter bara `hostname`, `service` och `disableChunkedEncoding` – **ingen `path`** – och HA-regeln ligger först. Alla anrop till `ha.msdev.bid/v1/apk/...` hamnar därför i Home Assistant, som inte har den sökvägen → 404. Det går inte att lägga en sökvägsregel för samma värdnamn i det tillägget utan att byta tunnelhantering.
 
-## Cloudflare Tunnel – behåll nuvarande HA-regel
+Lösningen: tillägget har nu `ingress: true` (port 8100). Home Assistant når det själv via `/api/hassio_ingress/<token>/`, som redan går genom din nuvarande HA-rutt. **Ingen rad i Cloudflared-konfigurationen ska ändras.**
 
-Lägg en mer specifik regel **före** nuvarande hela-värden-regeln för ha.msdev.bid. Ändra inte nuvarande HA-service (ofta homeassistant:8123). Tunneln får inte routa hela HA-värden till APK-appen.
+## Installera / uppdatera
 
-För lokalt hanterad cloudflared används följande ingressregler i den befintliga tunnelfilen. Container-DNS för den här appen från repot är `69daba89-rm-apk-updates`; kontrollera faktisk app/container innan användning:
+1. Inställningar → Appar (Tillägg) → Tilläggsbutik → ⋮ → **Sök efter uppdateringar** (eller `ha store reload`).
+2. Öppna **RM APK och appuppdateringar** → **Uppdatera** till **0.3.0**. Byggsteget kan ta några minuter.
+3. Kontrollera Konfiguration: `package_name` = APK:ns riktiga paketnamn (används bara för APK-publiceringen).
+4. Starta. Loggen ska visa `RM APK listening on internal port 8100 for Home Assistant ingress only.`
+5. Info-fliken ska visa **Öppna webbgränssnitt** (ingress aktiv). Sidopanel behövs inte.
 
-```yaml
-ingress:
-  - hostname: ha.msdev.bid
-    path: ^/v1/apk(/.*)?$
-    service: http://69daba89-rm-apk-updates:8100
-  # Behåll befintliga HA-, övriga värd- och sista catch-all-regler här.
-```
+Krav: RM-serverns Home Assistant-token (`HA_TOKEN`) tillhör en HA-administratör – ingress-sessioner kräver det.
 
-För fjärrhanterad tunnel: Cloudflare Zero Trust → Networks → Tunnels → din tunnel → Public hostnames/Published application routes: lägg **samma hostname ha.msdev.bid**, Path `^/v1/apk(/.*)?$`, HTTP service `69daba89-rm-apk-updates:8100`. Behåll befintlig ha.msdev.bid-regel utan path. Public HTTPS är port 443, TLS termineras hos Cloudflare; HTTP 8100 stannar på HA:s interna containernät. Exponera aldrig 8100 i routern/LAN och aktivera inte noTLSVerify.
+## Säkerhet
 
-### För ditt Cloudflared-tillägg på Home Assistant
+- Tillägget tar bara emot anrop från Supervisors ingress-proxy (172.30.32.2), ingen värdport publiceras.
+- Varje anrop bär ett 60-sekunders krypterat RM-tillstånd som tillägget kontrollerar online mot RM (aktiv, godkänd administratör).
+- HA-token och ingress-session finns bara på RM-servern, aldrig i webbläsaren.
+- Filnamn: bokstäver a–z, siffror, `.`, `-`, `_`, max 128 tecken. Inga sökvägar, dolda filer eller `app-update.json` (skrivs av APK-publiceringen).
+- Delar sparas privat i `/config/.rm-apk-uploads`, utanför `www`. Efter full uppladdning kontrolleras storlek och SHA-256, och filen flyttas atomiskt till `/config/www/apk/<namn>`; en befintlig fil med samma namn ersätts i ett steg (läsare ser gammal eller ny fil, aldrig en halv).
 
-Den granskade standardappen (homeassistant-apps/app-cloudflared, tidigare brenner-tobias) har **inte path i additional_hosts-schema**, och `run_parameters` tillåter inte egen --config. Lägg alltså inte till en påhittad `path` där. För samma ha.msdev.bid behöver tillägget använda en **fjärrhanterad tunnel**:
+## Använda
 
-1. Säkerhetskopiera nuvarande Cloudflared-inställningar och dokumentera alla befintliga domäner och HA-target. Behåll nuvarande tunnel tills de nya routningarna är klara.
-2. I Cloudflare Zero Trust, skapa en fjärrhanterad Cloudflared-tunnel (eller migrera den befintliga via Cloudflares stöd om det erbjuds). Lägg HA-routen för `ha.msdev.bid` med samma HA-service som idag och alla andra befintliga värdar.
-3. Lägg dessutom APK-routen ovan med path och intern service **före** HA:s standardroute. DNS för ha.msdev.bid ska peka på den tunnel som innehåller båda reglerna; skapa inte två konkurrerande tunnel-CNAME.
-4. I HA Cloudflared-tilläggets konfiguration ange dess `tunnel_token` via HA:s lokala inställningsfält, spara och starta om. Token kommer från Cloudflares Install connector-steg och ska aldrig delas med Lovable/chatten. Vid tokenläge ignoreras `external_hostname`/`additional_hosts`; alla gamla regler måste därför finnas i Cloudflare före bytet.
-5. Kontrollera att HA-webbsidan och /local/apk/app-update.json fungerar som tidigare, och att /v1/apk/space ger 401 JSON. Om HA slutar fungera återställ din sparade tunnelkonfiguration och DNS innan felsökning.
+RM → Dashboard → Filhanterare → **APK och appuppdateringar** → **Ladda upp fil till Home Assistant**. Procent, MB, kB/s och återstående tid visas. Pausa/Återuppta fortsätter från senaste bekräftade byte. Filen nås sedan på `https://ha.msdev.bid/local/apk/<namn>`.
 
-Det här kräver administratörsåtkomst till din HA och Cloudflare, som inte finns i den här körningen. Ingen tunnel/DNS-inställning är ändrad här.
+Den separata rutan **APK och appuppdateringar** (versionskod, signaturkontroll och `app-update.json`) använder samma väg.
 
-Verifiera från cloudflared-containern/HA-värdterminalen:
-```sh
-curl --fail http://69daba89-rm-apk-updates:8100/healthz
-# För lokalt hanterad tunnel (byt fil till din befintliga konfigurationsfil):
-cloudflared tunnel ingress validate --config /path/to/config.yml
-cloudflared tunnel ingress rule --config /path/to/config.yml https://ha.msdev.bid/v1/apk/space
-```
+## Test från dator utan Tailscale
 
-Från dator UTAN Tailscale, testa:
-```sh
-curl -i https://ha.msdev.bid/v1/apk/space
-```
-Förväntat **HTTP 401** och JSON om kortlivad behörighet; 404/HA-inloggningssida betyder fel tunnelregel, 502 betyder intern service ej nåbar. Ingen certifikatvarning och inget `-k`. `/healthz` är en intern kontroll och behöver inte exponeras publikt. Cloudflare får inte cachelagra /v1/apk/* eller app-update.json; inga challenge-sidor får ersätta API-svar, PATCH och OPTIONS måste tillåtas. Behåll övriga tunnel-/Access-skydd; riktad API-policy måste acceptera RM-behörighetskontrollen.
+1. Skapa `upload-test.txt` med innehållet `test-1`, ladda upp. Öppna `https://ha.msdev.bid/local/apk/upload-test.txt?x=1` → `test-1`.
+2. Ändra innehållet till `test-2`, ladda upp samma namn → sidan visar `test-2` (ersatt).
+3. Ladda upp en APK-stor fil (t.ex. 40–80 MB) och kontrollera att hastighet/återstående tid visas och att filen kan laddas ner.
+4. `https://ha.msdev.bid/` öppnar fortfarande Home Assistant.
 
-## Behörighet och hemligheter
-
-Lovable Secrets innehåller `RM_APK_UPLOAD_PERMISSION_KEY`; den har genererats säkert och finns endast på RM-servern. Inga nya nycklar eller HA-token behövs på HA eller i Vercel. Vercel vidarebefordrar RM-grant/introspection till Lovable.
-
-RM-sessionen skickas enbart till RM `/api/public/apk-admin`, som verifierar aktiv profil och adminroll och utfärdar ett AES-GCM-krypterat, 60-sekunders tillstånd. Webbläsaren skickar endast det opaka tillståndet i Authorization till HA, aldrig RM-sessionen, nycklar eller URL-parametrar. HA kontrollerar tillståndet online mot RM på varje operation; RM kontrollerar sessionen och rollen igen. Utgångna/återkallade tillstånd nekas. Ingen tillståndslagring i webbläsaren/manifestet eller accessloggning.
-
-## Uppladdning och publicering
-
-Filhanterare → **APK och appuppdateringar**, bredvid **Videor**. Välj `rmlarm.apk`, versionCode/versionName och anteckningar. Diskkontroll, procent, byte, kB/s, ETA och status visas. Delarna är 2 MiB, inte en låg totalgräns. Servern reserverar ledigt diskutrymme. Pausa/återuppta; efter omladdning välj samma fil/metadata så hittas bytepositionen genom konto och SHA-256.
-
-API: GET `/v1/apk/space`; POST `/v1/apk/uploads`; GET/PATCH `/v1/apk/uploads/{id}`; POST `/v1/apk/uploads/{id}/finish`.
-
-Storlek, hash, verkligt Android-paket/version och giltig APK-signatur verifieras före publicering. `rmlarm.apk` ersätts atomiskt och manifestet skrivs sist med **samma format**: versionCode, versionName, apkUrl, message. Versionsunik `rmlarm-<sha256>.apk` under /local/apk/ håller gamla manifest användbara även vid avbrott mellan två filbyten. Android kontrollerar signerarkontinuitet. Gamla APK-filer och pausade uppladdningar raderas inte automatiskt.
-
-## Återstående verklig verifiering
-
-HA-installation/containerbyggning, tunnelns path-routing, stor riktig APK från dator och mobil utan Tailscale, avbrott/återupptagning samt Androidinstallation kräver åtkomst till HA/tunneln. Lokala tester är inte bevis på dessa steg. Dela aldrig nycklar eller sessionstoken i chatten.
+API (internt, via ingress): GET `/v1/files/space`; POST `/v1/files/uploads` `{name,size,sha256}`; GET/PATCH `/v1/files/uploads/{id}` (`Upload-Offset`); POST `/v1/files/uploads/{id}/finish`. APK-publicering: samma under `/v1/apk/`.
