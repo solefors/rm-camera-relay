@@ -33,7 +33,18 @@ def public_key(jwk):
     return ec.EllipticCurvePublicNumbers(int.from_bytes(decode(jwk["x"]), "big"), int.from_bytes(decode(jwk["y"]), "big"), ec.SECP256R1()).public_key()
 
 
+def configured_public_key(jwk):
+    # Operator-pasted keys may carry the standard alg/use labels; never accept private material here.
+    if not isinstance(jwk, dict) or not set(jwk) <= {"kty", "crv", "x", "y", "alg", "use"}:
+        raise ValueError("key")
+    if jwk.get("alg", "ES256") != "ES256" or jwk.get("use", "sig") != "sig":
+        raise ValueError("key")
+    return public_key({k: jwk[k] for k in ("kty", "crv", "x", "y")})
+
+
 def private_key(jwk):
+    if not isinstance(jwk, dict) or not isinstance(jwk.get("d"), str) or jwk.get("alg", "ES256") != "ES256" or jwk.get("use", "sig") != "sig":
+        raise ValueError("key")
     public = {k: jwk[k] for k in ("kty", "crv", "x", "y")}
     key = ec.derive_private_key(int.from_bytes(decode(jwk["d"]), "big"), ec.SECP256R1())
     if key.public_key().public_numbers() != public_key(public).public_numbers():

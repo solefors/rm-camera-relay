@@ -8,7 +8,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
-from .security import ORIGIN, INTROSPECT, Replay, digest, grant, private_key, proof, public_key, sign
+from .security import ORIGIN, INTROSPECT, Replay, configured_public_key, digest, grant, private_key, proof, sign
 from .media import source_path, rewrite
 
 # Neither aiohttp access logging nor exception details may disclose bearer/proof/source resources.
@@ -247,24 +247,51 @@ def app_for(relay):
     return app
 
 
-async def start():
+class Startup(Exception):
+    """Fixed, value-free startup reason that is safe to print in the add-on log."""
+
+
+def load_config(options_path=Path("/data/options.json"), environ=os.environ, ssl_root=Path("/ssl")):
     # Fixed paths: options cannot read arbitrary host files; /ssl is read-only inside this container.
-    config = json.loads(Path("/data/options.json").read_text())
-    def ssl_file(name):
-        path = Path(config[name])
-        if path.parent != Path("/ssl") or path.name.startswith("."):
-            raise ValueError("configuration")
-        return str(path)
-    rm_key = public_key(json.loads(config["rm_grant_public_jwk"]))
-    service_key = private_key(json.loads(Path(ssl_file("relay_private_jwk_file")).read_text()))
-    token = os.environ.get("SUPERVISOR_TOKEN")
+    try:
+        config = json.loads(Path(options_path).read_text())
+    except Exception:
+        raise Startup("/data/options.json is missing or invalid") from None
+    raw = config.get("rm_grant_public_jwk")
+    if not isinstance(raw, str) or not raw.strip():
+        raise Startup("rm_grant_public_jwk is empty; paste the public grant JWK (kty, crv, x, y; no d)") from None
+    try:
+        rm_key = configured_public_key(json.loads(raw))
+    except Exception:
+        raise Startup("rm_grant_public_jwk is not a public P-256 JWK (no d member allowed)") from None
+    path = Path(str(config.get("relay_private_jwk_file", "")))
+    if path.parent != ssl_root or path.name.startswith("."):
+        raise Startup("relay_private_jwk_file must be a file directly in /ssl") from None
+    try:
+        text = path.read_text()
+    except Exception:
+        raise Startup("relay_private_jwk_file is missing or unreadable in /ssl") from None
+    try:
+        service_key = private_key(json.loads(text))
+    except Exception:
+        raise Startup("relay_private_jwk_file is not a valid private P-256 JWK") from None
+    token = environ.get("SUPERVISOR_TOKEN")
     if not token:
-        raise ValueError("configuration")
+        raise Startup("SUPERVISOR_TOKEN is missing; homeassistant_api must stay enabled") from None
+    return rm_key, service_key, token
+
+
+async def start():
+    rm_key, service_key, token = load_config()
     async with ClientSession(timeout=ClientTimeout(total=3), trust_env=False) as http:
         relay = Relay(rm_key, service_key, token, http)
         runner = web.AppRunner(app_for(relay), access_log=None)
         await runner.setup()
-        await local_site(runner).start()
+        try:
+            await local_site(runner).start()
+        except OSError:
+            raise Startup("cannot listen on 127.0.0.1:8099; another host process already uses it") from None
+        print("RM Camera Relay listening on http://127.0.0.1:8099 (host loopback only; expose with Tailscale Serve on 8443).", flush=True)
         try:
             while True:
                 await asyncio.sleep(1)
@@ -278,7 +305,11 @@ if __name__ == "__main__":
         asyncio.run(start())
     except KeyboardInterrupt:
         pass
+    except Startup as error:
+        # Reasons are fixed strings; never key material, file contents or configuration values.
+        print(f"RM Camera Relay stopped: {error}.", flush=True)
+        raise SystemExit(1) from None
     except Exception:
         # Do not print filesystem/key/HTTP exceptions or dump configuration.
-        print("RM Camera Relay stopped: check local configuration/loopback port.", flush=True)
+        print("RM Camera Relay stopped: unexpected startup error.", flush=True)
         raise SystemExit(1) from None

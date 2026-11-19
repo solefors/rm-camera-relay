@@ -1,79 +1,123 @@
-# RM Camera Relay 0.2.0 – Tailscale Serve
+# RM Camera Relay 0.2.1 – bakom Tailscale Serve
 
-Endast camera.ipc_substream och camera.ipc_substream_2. RM-inloggning, aktiv godkänd profil och kamerabehörighet krävs. 60-sekunders ES256-grants och native P-256-klientbevis krävs för varje mediaanrop; online-introspektion före öppning/förnyelse. HA-token och ursprungliga streamresurser stannar lokalt. Kamerareserven och HA:s vanliga listener ändras inte.
+Endast `camera.ipc_substream` och `camera.ipc_substream_2`. RM-inloggning, aktiv godkänd profil och kamerabehörighet krävs. Varje mediaanrop kräver ett 60-sekunders ES256-grant och ett P-256-klientbevis från Android; öppning och förnyelse kontrolleras online mot RM. HA-token och kamerans ursprungliga resurser stannar i tillägget. Den vanliga HA-sidan och appens befintliga kameraförmedlare är oförändrade reserver.
 
-## Uppdatera reläet
+## Nätverk: vilken port och hur Tailscale når den
 
-1. Home Assistant → Settings → Apps → Install app → ⋮ → Repositories: https://github.com/solefors/rm-camera-relay
-2. Uppdatera listan, stoppa gamla reläet och uppdatera till **0.2.0**.
-3. Gamla portmappningen 8443 → 8099/tcp tas bort. Reläet använder nu host_network och binder **endast 127.0.0.1:8099** med HTTP. Tailscale Serve äger HTTPS-port 8443. Publicera aldrig HTTP på LAN eller internet.
-4. Konfiguration:
+```text
+Android (Tailscale) ──HTTPS──> homeassistant.tailc16667.ts.net:8443
+                               Tailscale-appen (Serve, TLS-certifikat)
+                               ──HTTP──> 127.0.0.1:8099 på HA-värden
+                                         RM Camera Relay
+```
+
+- Reläet lyssnar på **127.0.0.1:8099/TCP, vanlig HTTP, endast HA-värdens loopback**.
+- Både reläet (`host_network: true`) och Tailscale-appen 0.30.7 (`host_network: true`) kör i HA-värdens nätverk. De delar därför samma `127.0.0.1`, trots att de är separata containrar. Ingen Docker-port behöver publiceras.
+- `ha apps info` visar därför **`network: null`**. Det är korrekt. Lägg inte till en portmappning: den skulle exponera okrypterad HTTP på LAN och fungerar inte ihop med värdnätverk.
+- Port **8443** ägs av Tailscale Serve, inte av reläet.
+
+## 1. Uppdatera till 0.2.1
+
+```sh
+ha store reload
+ha apps info 69daba89_rm_camera_relay      # version_latest: 0.2.1
+ha apps stop 69daba89_rm_camera_relay
+ha apps update 69daba89_rm_camera_relay
+```
+
+Om `version_latest` fortfarande är äldre: `ha store repair 69daba89` och sedan `ha store reload`. Avinstallera inte.
+
+## 2. Konfiguration
+
+Tilläggets schema har bara två fält:
 
 ```yaml
-rm_grant_public_jwk: '<din befintliga publika grant-JWK>'
+rm_grant_public_jwk: '{"kty":"EC","crv":"P-256","x":"...","y":"...","alg":"ES256","use":"sig"}'
 relay_private_jwk_file: /ssl/rm-camera-relay-private.jwk
 ```
 
-Ta bort gamla tls_cert_file/tls_key_file om de finns kvar i sparad konfiguration. Inga nya nyckelpar krävs för uppdateringen. Reläets privata JWK behövs fortfarande, men inga lokala TLS-certifikat eller TLS-nyckelfiler. /ssl är read-only i reläet. Starta reläet.
+- `rm_grant_public_jwk`: den **publika** grant-nyckeln som RM visade (en rad JSON, utan `d`). `alg`/`use` får finnas med från och med 0.2.1. Fältet får inte vara tomt.
+- `relay_private_jwk_file`: reläets privata nyckel, som du skapade på HA. Den ska ligga direkt i `/ssl`, vara läsbar och aldrig lämna HA.
+- Inga TLS-certifikat eller TLS-nyckelfiler behövs.
 
-## Tailscale-appen ghcr.io/hassio-addons/tailscale:0.30.7
-
-Exakt version installerar CLI i **/opt/tailscale** (inte vanliga PATH), och använder HA-värdens nätverk. share_homeassistant kan bara dela HA, inte ändra proxy till reläet. services gäller svc:-namn och är inte HA-nodens MagicDNS-adress. Lägg till separat nod-Serve på 8443 via CLI.
-
-1. Aktivera MagicDNS och HTTPS Certificates i Tailscale-admin. Befintliga nodnamnet ska vara homeassistant.tailc16667.ts.net. Serve hanterar certifikat och privata TLS-nycklar i Tailscale-appens tillstånd; de behöver inte exporteras till /ssl.
-2. Behåll fungerande HA-delning **share_homeassistant: serve** och **share_on_port: 443** om HA redan delas där. Ändra inte HA:s övriga inställningar eller befintliga services. Använd aldrig Funnel för reläet. Starta Tailscale helt före nästa steg; versionen gör en engångsrensning av gamla Serve-inställningar före första start.
-3. Kommandona körs inne i Tailscale-containern. Vanliga Terminal-appen har separat filsystem. Använd säker HA OS-värdåtkomst, t.ex. debug-SSH port 22222 eller fysisk HA-konsol med login, och identifiera rätt container:
+Starta och läs loggen:
 
 ```sh
-docker ps --format '{{.Names}} {{.Image}}' | grep 'ghcr.io/hassio-addons/tailscale:0.30.7'
+ha apps start 69daba89_rm_camera_relay
+ha apps logs 69daba89_rm_camera_relay
 ```
 
-Ersätt TAILSCALE_CONTAINER nedan med exakt namn från svaret. Har du inte värdåtkomst behövs den innan kommandona kan köras; stäng inte av skydd, dela inte SSH-nycklar och skapa inte en ny Tailscale-nod på en dator som ersättning.
+Lyckad start: `RM Camera Relay listening on http://127.0.0.1:8099 (host loopback only; expose with Tailscale Serve on 8443).`
+
+Vid fel visas en exakt orsak utan nyckelvärden:
+
+| Logg | Åtgärd |
+|---|---|
+| `rm_grant_public_jwk is empty` | Klistra in den publika grant-nyckeln. |
+| `rm_grant_public_jwk is not a public P-256 JWK` | Fel format, eller en privat nyckel med `d` inklistrad. Använd bara den publika raden. |
+| `relay_private_jwk_file is missing or unreadable in /ssl` | Kontrollera filnamnet i `/ssl`. |
+| `relay_private_jwk_file is not a valid private P-256 JWK` | Filen är skadad, eller är den publika halvan. |
+| `SUPERVISOR_TOKEN is missing` | `homeassistant_api` måste vara på (standard i tillägget). |
+| `cannot listen on 127.0.0.1:8099` | En annan process på HA-värden använder 8099. |
+
+## 3. Tailscale-appen 0.30.7: Serve 8443 → 127.0.0.1:8099
+
+CLI:t finns i `/opt/tailscale` inne i Tailscale-containern. Kör kommandona från HA OS-värdens skal (debug-SSH på port 22222 eller den fysiska konsolen). Terminal-appen har inte Docker-åtkomst.
 
 ```sh
-docker exec TAILSCALE_CONTAINER /opt/tailscale version
-docker exec TAILSCALE_CONTAINER curl --fail --silent --show-error http://127.0.0.1:8099/healthz
-docker exec TAILSCALE_CONTAINER /opt/tailscale serve status
+docker ps --format '{{.Names}} {{.Image}}' | grep hassio-addons/tailscale
+# vanligen: addon_a0d7b954_tailscale
+TS=addon_a0d7b954_tailscale
+
+# 1. Reläet nås från Tailscale-containern via delad loopback:
+docker exec $TS curl --fail --silent --show-error http://127.0.0.1:8099/healthz
+#    förväntat: {"ok":true}
+
+# 2. Lägg till Serve på 8443 (tailnet-only, inte Funnel):
+docker exec $TS /opt/tailscale serve --bg --https=8443 http://127.0.0.1:8099
+
+# 3. Kontrollera:
+docker exec $TS /opt/tailscale serve status
+#    https://homeassistant.tailc16667.ts.net:8443 (tailnet only)
+#    |-- / proxy http://127.0.0.1:8099
+#    HA på 443 ska finnas kvar oförändrad.
 ```
 
-Lokalt svar: HTTP 200 och {"ok":true}. Om /opt/tailscale saknas i rätt container, stoppa och kontrollera image/version. Kontrollera att 8443 inte redan används av en annan Serve/Funnel eller host-process; ersätt inte en befintlig tjänst. Lägg till:
+- Behåll `share_homeassistant: serve` och `share_on_port: 443` i Tailscale-appen. Sätt inte `share_on_port` till 8443, för då delas HA där i stället.
+- Kör aldrig `serve reset`, `funnel`, `https+insecure` eller `-k`.
+- I Tailscale-admin ska MagicDNS och HTTPS Certificates vara på. ACL/grants ska tillåta Android-enheterna att nå HA-noden på TCP 8443.
+- `--bg` sparar inställningen i Tailscales tillstånd. Kontrollera `serve status` efter omstart av Tailscale eller HA.
 
-```sh
-docker exec TAILSCALE_CONTAINER /opt/tailscale serve --bg --https=8443 --set-path=/ http://127.0.0.1:8099
-docker exec TAILSCALE_CONTAINER /opt/tailscale serve status
-```
+Om steg 1 misslyckas körs reläet inte. Läs reläets logg enligt steg 2.
 
-Status ska visa 8443 → http://127.0.0.1:8099, tailnet-only, medan HA på 443 finns kvar. Följ eventuell Tailscale-godkännandelänk för HTTPS/Serve. Kör aldrig serve reset, funnel, https+insecure eller en global ersättning av fungerande inställningar.
+## 4. Verifiera /healthz
 
---bg sparar extra Serve-inställningen i Tailscales tillstånd; 0.30.7:s HA-Serve kör separat på sin konfigurerade port. Kontrollera status och båda adresser efter Tailscale-/HA-omstart och efter framtida uppdateringar. ACL/grants ska tillåta avsedda Android-enheter/användare → HA-noden TCP 8443; behåll befintliga HA-regler. Tailscale-identitet ersätter aldrig RM-behörighet eller klientbevis.
-
-Källor för 0.30.7:
-- https://github.com/hassio-addons/addon-tailscale/blob/v0.30.7/tailscale/Dockerfile
-- https://github.com/hassio-addons/addon-tailscale/blob/v0.30.7/tailscale/rootfs/etc/s6-overlay/s6-rc.d/share-homeassistant/run
-- https://github.com/hassio-addons/addon-tailscale/blob/v0.30.7/tailscale/rootfs/etc/s6-overlay/s6-rc.d/post-tailscaled/run
-
-## Verifiera från telefonen med Tailscale och mobildata
-
-Öppna **https://homeassistant.tailc16667.ts.net:8443/healthz**.
-
-Krav: HTTP 200, {"ok":true}, ingen certifikatvarning och rätt värdnamn. Alternativt från en redan tailnet-ansluten dator:
+Från en telefon eller dator som är ansluten till Tailscale:
 
 ```sh
 curl --fail --show-error --max-time 5 https://homeassistant.tailc16667.ts.net:8443/healthz
 ```
 
-Använd aldrig -k/--insecure eller Androids trust-all/certifikatundantag. HA på 443 bekräftar inte 8443. Hälsan verifierar process/proxy/TLS, inte grantnyckelmatchning, kamerabehörighet eller faktisk video. Oautentiserad POST /v1/streams/open ska nekas med 401. Kontrollera även fungerande HA 443/8123 och appens kamerareserv.
+Krav: HTTP 200, `{"ok":true}` och ingen certifikatvarning. Följande ska nekas med 401:
 
-## Android och hemligheter
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' -X POST -d '{}' https://homeassistant.tailc16667.ts.net:8443/v1/streams/open
+```
 
-Android öppnar **POST https://homeassistant.tailc16667.ts.net:8443/v1/streams/open**, body exakt {}. Ska först få ett 60-sekunders grant från **POST https://www.msdev.bid/api/mobile/camera-grant** med RM-session, entityId och native clientPublicJwk. Varje relay-anrop kräver Authorization: Bearer grant och X-RM-Proof: ES256 JWT med jwk, htm, htu, bh, ath, iat, nonce. htu är exakt EXTERN HTTPS-origin på 8443 + faktisk sökväg, aldrig http://127.0.0.1:8099. Grant/proof hålls i native, aldrig JavaScript, URL, cache eller Logcat. Förnya vid ca 30 sekunder med nytt grant och POST /v1/streams/{id}/renew; varje manifest/segment/nyckel har egen proof. Reläet återger endast opaque resursreferenser.
+`/healthz` visar bara att process, Serve och TLS fungerar. Det bevisar inte nyckelmatchning, kamerabehörighet eller video.
 
-- Lovable Secrets: befintliga RM_CAMERA_GRANT_PRIVATE_JWK och RM_CAMERA_RELAY_PUBLIC_JWK behålls. Bara grantens publika JWK anges i HA-fältet rm_grant_public_jwk.
-- Endast HA: /ssl/rm-camera-relay-private.jwk och automatisk SUPERVISOR_TOKEN. Tailscale äger TLS-nycklarna; inga TLS-filer behöver skapas i /ssl.
-- Vercel: inga nya privata nycklar/certifikat; befintlig vidarebefordring till Lovable används.
+## Android
 
-Skriv aldrig ut privata nycklar. Återanvänd matchande befintliga JWK-par; generate_keys.py skriver privata filer och ska bara användas om ett par verkligen saknas. Ingen separat HA-inloggning behövs.
+1. `POST https://www.msdev.bid/api/mobile/camera-grant` med RM-session, `entityId` och native `clientPublicJwk`. Svaret innehåller ett 60-sekunders grant.
+2. `POST https://homeassistant.tailc16667.ts.net:8443/v1/streams/open`, body exakt `{}`, `Authorization: Bearer <grant>` och `X-RM-Proof`. `htu` är alltid den externa HTTPS-adressen på 8443, aldrig `http://127.0.0.1:8099`.
+3. Förnya med nytt grant via `POST /v1/streams/{id}/renew`. Avsluta med `DELETE /v1/streams/{id}`.
 
-## Verifieringsgräns
+Om något steg misslyckas används appens befintliga kameraförmedlare.
 
-Implementerad loopback och autentiserat syntetiskt HLS-flöde är testade lokalt; fysisk HA-installation, Serve/TLS på din tailnet, Supervisor-HLS och Android-video är inte verifierade. Befintlig proxyreserv och avstängd releasegrind lämnas oförändrade tills verkliga kontroller är godkända.
+## Var nycklarna finns
+
+- **Lovable Secrets:** `RM_CAMERA_GRANT_PRIVATE_JWK` och `RM_CAMERA_RELAY_PUBLIC_JWK`.
+- **Endast HA:** `/ssl/rm-camera-relay-private.jwk` och den automatiska `SUPERVISOR_TOKEN`. TLS-nycklarna ägs av Tailscale.
+- **Vercel:** inga nya hemligheter. Vercel vidarebefordrar till Lovable.
+
+Skriv aldrig ut privata nycklar och klistra inte in dem i någon chatt.

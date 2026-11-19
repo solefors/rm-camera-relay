@@ -1,5 +1,5 @@
 name: RM Camera Relay
-version: "0.2.0"
+version: "0.2.1"
 slug: rm_camera_relay
 description: RM-authorized relay for two cameras only
 arch: [aarch64, amd64]
