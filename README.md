@@ -121,3 +121,7 @@ Om något steg misslyckas används appens befintliga kameraförmedlare.
 - **Vercel:** inga nya hemligheter. Vercel vidarebefordrar till Lovable.
 
 Skriv aldrig ut privata nycklar och klistra inte in dem i någon chatt.
+
+## APK och appuppdateringar – separat tillägg
+
+Den nya uppladdningsappen är oberoende av kamerareläet. Se [installation och säker uppladdning](rm_apk_updates/README.md). Den använder intern containerport 8100 och publik HTTPS via ha.msdev.bid/v1/apk/ och Cloudflare Tunnel, utan att ändra kamerareserv eller Serve 8443. Koden finns i projektet; publicering/installation på HA återstår.
