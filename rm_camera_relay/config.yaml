@@ -1,5 +1,5 @@
 name: RM Camera Relay
-version: "0.1.0"
+version: "0.2.0"
 slug: rm_camera_relay
 description: RM-authorized relay for two cameras only
 arch: [aarch64, amd64]
@@ -9,19 +9,14 @@ init: false
 homeassistant_api: true
 hassio_api: false
 auth_api: false
-host_network: false
-ports:
-  8099/tcp: 8443
+# Tailscale also uses the host network. Never publish the cleartext listener on LAN.
+host_network: true
 map:
   - ssl:ro
-watchdog: tcp://[HOST]:[PORT:8099]
+watchdog: http://127.0.0.1:8099/healthz
 options:
   rm_grant_public_jwk: ""
   relay_private_jwk_file: /ssl/rm-camera-relay-private.jwk
-  tls_cert_file: /ssl/homeassistant.tailc16667.ts.net.crt
-  tls_key_file: /ssl/homeassistant.tailc16667.ts.net.key
 schema:
   rm_grant_public_jwk: str
   relay_private_jwk_file: str
-  tls_cert_file: str
-  tls_key_file: str

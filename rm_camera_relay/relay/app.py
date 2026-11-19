@@ -3,7 +3,6 @@ import json
 import logging
 import os
 import secrets
-import ssl
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -15,6 +14,12 @@ from .media import source_path, rewrite
 # Neither aiohttp access logging nor exception details may disclose bearer/proof/source resources.
 logging.disable(logging.CRITICAL)
 NO_STORE = {"Cache-Control": "no-store", "Pragma": "no-cache", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer"}
+
+
+def local_site(runner):
+    # Fixed HA-host loopback only: Serve owns external TLS/8443. Never use forwarded
+    # headers to establish identity or change the proof's fixed external HTTPS origin.
+    return web.TCPSite(runner, "127.0.0.1", 8099)
 
 
 class Denied(Exception):
@@ -250,9 +255,6 @@ async def start():
         if path.parent != Path("/ssl") or path.name.startswith("."):
             raise ValueError("configuration")
         return str(path)
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.minimum_version = ssl.TLSVersion.TLSv1_2
-    context.load_cert_chain(ssl_file("tls_cert_file"), ssl_file("tls_key_file"))
     rm_key = public_key(json.loads(config["rm_grant_public_jwk"]))
     service_key = private_key(json.loads(Path(ssl_file("relay_private_jwk_file")).read_text()))
     token = os.environ.get("SUPERVISOR_TOKEN")
@@ -262,7 +264,7 @@ async def start():
         relay = Relay(rm_key, service_key, token, http)
         runner = web.AppRunner(app_for(relay), access_log=None)
         await runner.setup()
-        await web.TCPSite(runner, "0.0.0.0", 8099, ssl_context=context).start()
+        await local_site(runner).start()
         try:
             while True:
                 await asyncio.sleep(1)
@@ -278,5 +280,5 @@ if __name__ == "__main__":
         pass
     except Exception:
         # Do not print filesystem/key/HTTP exceptions or dump configuration.
-        print("RM Camera Relay stopped: check local configuration/TLS.", flush=True)
+        print("RM Camera Relay stopped: check local configuration/loopback port.", flush=True)
         raise SystemExit(1) from None
