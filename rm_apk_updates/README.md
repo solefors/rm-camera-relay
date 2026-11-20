@@ -1,4 +1,4 @@
-# RM APK och appuppdateringar 0.3.0 – uppladdning via befintliga ha.msdev.bid
+# RM APK och appuppdateringar 0.4.0 – automatisk versionsläsning
 
 Webbläsaren (dator eller mobil) laddar upp till RM-appen. RM-servern kontrollerar att du är aktiv, godkänd administratör och skickar filen vidare i delar om 2 MiB till detta tillägg genom **Home Assistants egen ingress** på den befintliga adressen `https://ha.msdev.bid`. Ingen Tailscale, ingen Android-app och **ingen ändring av Cloudflared/Cloudflare** behövs. Kameraflödet ändras inte.
 
@@ -11,7 +11,7 @@ Lösningen: tillägget har nu `ingress: true` (port 8100). Home Assistant når d
 ## Installera / uppdatera
 
 1. Inställningar → Appar (Tillägg) → Tilläggsbutik → ⋮ → **Sök efter uppdateringar** (eller `ha store reload`).
-2. Öppna **RM APK och appuppdateringar** → **Uppdatera** till **0.3.0**. Byggsteget kan ta några minuter.
+2. Öppna **RM APK och appuppdateringar** → **Uppdatera** till **0.4.0**. Byggsteget kan ta några minuter.
 3. Kontrollera Konfiguration: `package_name` = APK:ns riktiga paketnamn (används bara för APK-publiceringen).
 4. Starta. Loggen ska visa `RM APK listening on internal port 8100 for Home Assistant ingress only.`
 5. Info-fliken ska visa **Öppna webbgränssnitt** (ingress aktiv). Sidopanel behövs inte.
@@ -30,7 +30,11 @@ Krav: RM-serverns Home Assistant-token (`HA_TOKEN`) tillhör en HA-administratö
 
 RM → Dashboard → Filhanterare → **APK och appuppdateringar** → **Ladda upp fil till Home Assistant**. Procent, MB, kB/s och återstående tid visas. Pausa/Återuppta fortsätter från senaste bekräftade byte. Filen nås sedan på `https://ha.msdev.bid/local/apk/<namn>`.
 
-Den separata rutan **APK och appuppdateringar** (versionskod, signaturkontroll och `app-update.json`) använder samma väg.
+I rutan **APK och appuppdateringar** väljer du bara APK-filen och eventuellt versionsanteckningar. Servern läser `packageName`, `versionCode` och `versionName` ur APK:ns verkliga Android-manifest och verifierar signaturen. Endast `com.example.rmdckentreprenadab` tillåts. Även APK-filer valda i den generella filrutan går igenom samma kontroll.
+
+Efter fullständig uppladdning och godkänd kontroll ersätts `/config/www/apk/rmlarm.apk` atomiskt. Därefter ersätts `app-update.json` atomiskt med verklig versionskod, versionsnamn och `apkUrl: https://ha.msdev.bid/local/apk/rmlarm.apk`. Befintliga andra JSON-fält och versionsanteckningar bevaras om inga nya anteckningar anges. Paket-, signatur-, metadata- eller hashfel lämnar båda publicerade filerna orörda. Skrivfel vid publicering återställer föregående filer. Varje filbyte är atomiskt; två separata filer kan inte bytas i en gemensam atomisk operation vid strömavbrott.
+
+Adminpanelen visar det verifierade paketnamnet, versionskoden, versionsnamnet och bekräftar att APK och JSON har publicerats. JSON laddas aldrig upp separat.
 
 ## Test från dator utan Tailscale
 
@@ -39,4 +43,4 @@ Den separata rutan **APK och appuppdateringar** (versionskod, signaturkontroll o
 3. Ladda upp en APK-stor fil (t.ex. 40–80 MB) och kontrollera att hastighet/återstående tid visas och att filen kan laddas ner.
 4. `https://ha.msdev.bid/` öppnar fortfarande Home Assistant.
 
-API (internt, via ingress): GET `/v1/files/space`; POST `/v1/files/uploads` `{name,size,sha256}`; GET/PATCH `/v1/files/uploads/{id}` (`Upload-Offset`); POST `/v1/files/uploads/{id}/finish`. APK-publicering: samma under `/v1/apk/`.
+API (internt, via ingress): GET `/v1/files/space`; POST `/v1/files/uploads` `{name,size,sha256}`; GET/PATCH `/v1/files/uploads/{id}` (`Upload-Offset`); POST `/v1/files/uploads/{id}/finish`. APK-publicering: samma under `/v1/apk/`, POST `{size,sha256,message?}`. Äldre klienters explicit angivna versionsfält verifieras fortfarande mot APK:n. Finish/status returnerar `publication: {packageName,versionCode,versionName,apkUrl,manifestUrl}` efter lyckad publicering.

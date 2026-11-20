@@ -5,7 +5,7 @@ from service.store import Store, Fault, APK_BASE
 class UploadTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(); self.root=Path(self.tmp.name)/'www'/'apk'
-        self.store=Store(self.root,'com.example.rm',lambda p:('com.example.rm',4,'1.0.3'))
+        self.store=Store(self.root,'com.example.rmdckentreprenadab',lambda p:('com.example.rmdckentreprenadab',4,'1.0.3'))
         self.bytes=b'complete-test-apk'
         self.data=dict(size=len(self.bytes),sha256=hashlib.sha256(self.bytes).hexdigest(),versionCode=4,versionName='1.0.3',message='Ny version')
     def tearDown(self): self.tmp.cleanup()
@@ -13,7 +13,7 @@ class UploadTests(unittest.TestCase):
         s=self.store.create('admin',self.data); m=self.store.metadata(s['id'],'admin'); self.store.append(m,0,self.bytes); return m
     def test_resume_after_restart(self):
         s=self.store.create('admin',self.data); self.store.append(self.store.metadata(s['id'],'admin'),0,self.bytes[:3])
-        self.assertEqual(Store(self.root,'com.example.rm').create('admin',self.data)['offset'],3)
+        self.assertEqual(Store(self.root,'com.example.rmdckentreprenadab').create('admin',self.data)['offset'],3)
         with self.assertRaises(Fault): self.store.append(self.store.metadata(s['id'],'admin'),0,b'x')
     def test_owner_only(self):
         s=self.store.create('admin',self.data)
@@ -30,7 +30,7 @@ class UploadTests(unittest.TestCase):
         self.assertEqual((self.root/'rmlarm.apk').read_bytes(),b'old')
     def test_metadata_verified(self):
         m=self.upload()
-        for info in [('evil.package',4,'1.0.3'),('com.example.rm',3,'1.0.3'),('com.example.rm',4,'wrong')]:
+        for info in [('evil.package',4,'1.0.3'),('com.example.rmdckentreprenadab',3,'1.0.3'),('com.example.rmdckentreprenadab',4,'wrong')]:
             self.store.inspector=lambda p,result=info:result
             with self.assertRaises(Fault): self.store.finish(m)
             self.assertFalse((self.root/'app-update.json').exists())
@@ -44,8 +44,8 @@ class UploadTests(unittest.TestCase):
         self.assertEqual((self.root/'rmlarm.apk').read_bytes(),self.bytes)
         release=json.loads((self.root/'app-update.json').read_text())
         self.assertEqual(release['versionCode'],4)
-        self.assertEqual(release['apkUrl'],APK_BASE+'rmlarm-'+self.data['sha256']+'.apk')
-        self.assertEqual((self.root/('rmlarm-'+hashlib.sha256(b'old').hexdigest()+'.apk')).read_bytes(),b'old')
+        self.assertEqual(release['apkUrl'],APK_BASE+'rmlarm.apk')
+        self.assertEqual(release['versionName'],'1.0.3')
     def test_fixed_paths(self):
         with self.assertRaises(Fault): self.store.metadata('../../etc/passwd','admin')
         with self.assertRaises(Fault): self.store.create('admin',dict(self.data,path='/etc/passwd'))

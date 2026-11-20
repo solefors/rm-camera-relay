@@ -10,6 +10,7 @@ from pathlib import Path
 
 CHUNK = 2 * 1024 * 1024
 APK_BASE = 'https://ha.msdev.bid/local/apk/'
+EXPECTED_PACKAGE = 'com.example.rmdckentreprenadab'
 # Plain names only: no path separators, hidden files or the managed update manifest.
 FILE_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
 RESERVED = {'app-update.json'}
@@ -75,12 +76,13 @@ class Store:
         return max(0, free - reserved)
 
     def create(self, user, data):
-        if not isinstance(data, dict) or set(data) != {'size', 'sha256', 'versionCode', 'versionName', 'message'}: raise Fault('Ogiltiga metadata.')
+        if not isinstance(data, dict) or not {'size', 'sha256'} <= set(data) or set(data) - {'size', 'sha256', 'versionCode', 'versionName', 'message'}: raise Fault('Ogiltiga metadata.')
+        if ('versionCode' in data) != ('versionName' in data): raise Fault('Ogiltiga metadata.')
         if type(data['size']) is not int or not 0 < data['size'] <= 2**53-1: raise Fault('Ogiltig filstorlek.')
         if not isinstance(data['sha256'], str) or not re.fullmatch('[a-f0-9]{64}', data['sha256']): raise Fault('Ogiltig kontrollsumma.')
-        if type(data['versionCode']) is not int or not 0 < data['versionCode'] <= 2**31-1: raise Fault('Ogiltig versionskod.')
-        if not isinstance(data['versionName'], str) or not 0 < len(data['versionName']) <= 100: raise Fault('Ogiltigt versionsnamn.')
-        if not isinstance(data['message'], str) or len(data['message']) > 2000: raise Fault('Ogiltiga versionsanteckningar.')
+        if 'versionCode' in data and (type(data['versionCode']) is not int or not 0 < data['versionCode'] <= 2**31-1): raise Fault('Ogiltig versionskod.')
+        if 'versionName' in data and (not isinstance(data['versionName'], str) or not 0 < len(data['versionName']) <= 100): raise Fault('Ogiltigt versionsnamn.')
+        if 'message' in data and (not isinstance(data['message'], str) or len(data['message']) > 2000): raise Fault('Ogiltiga versionsanteckningar.')
         # A selected file can resume after reload; no bearer or secret is persisted.
         for path in self.parts.glob('*.json'):
             m = json.loads(path.read_text())
@@ -89,8 +91,12 @@ class Store:
                 manifest = self.root / 'app-update.json'
                 if manifest.exists():
                     current = json.loads(manifest.read_text())
-                    if (current.get('apkUrl') == APK_BASE + 'rmlarm-' + m['sha256'] + '.apk'
-                            and all(current.get(k) == data[k] for k in ('versionCode', 'versionName', 'message'))): return self.status(m)
+                    if (current.get('apkUrl') == APK_BASE + 'rmlarm.apk'
+                            and all(current.get(k) == m.get(k) for k in ('versionCode', 'versionName'))
+                            and ('message' not in data or current.get('message') == data['message'])
+                            and (self.root / 'rmlarm.apk').exists()):
+                        with (self.root / 'rmlarm.apk').open('rb') as file:
+                            if hashlib.file_digest(file, 'sha256').hexdigest() == m['sha256']: return self.status(m)
         if data['size'] > self.space(): raise Fault('Otillräckligt diskutrymme på Home Assistant.', 507)
         ident = str(uuid.uuid4())
         m = dict(data, id=ident, user=user, state='uploading')
@@ -114,6 +120,8 @@ class Store:
         return self.status(m)
 
     def finish_file(self, m):
+        # APKs may never bypass manifest/signature checks through the generic file picker.
+        if m['name'].lower().endswith('.apk'): return self.finish(m)
         if m['state'] == 'complete': return self.status(m)
         path = self.parts / (m['id'] + '.part')
         if path.stat().st_size != m['size']: raise Fault('Filen är inte fullständigt uppladdad.', 409)
@@ -132,7 +140,9 @@ class Store:
 
     def status(self, m):
         partial = self.parts / (m['id'] + '.part')
-        return dict(id=m['id'], offset=partial.stat().st_size if partial.exists() else m['size'], size=m['size'], state=m['state'], chunkBytes=CHUNK)
+        result = dict(id=m['id'], offset=partial.stat().st_size if partial.exists() else m['size'], size=m['size'], state=m['state'], chunkBytes=CHUNK)
+        if m['state'] == 'complete' and 'publication' in m: result['publication'] = m['publication']
+        return result
 
     def append(self, m, offset, data):
         if m['state'] != 'uploading': raise Fault('Uppladdningen är redan publicerad.', 409)
@@ -145,33 +155,53 @@ class Store:
         return self.status(m)
 
     def finish(self, m):
-        if m.get('kind') == 'file': raise Fault('Fel uppladdningstyp.', 409)
+        if m.get('kind') == 'file' and not m['name'].lower().endswith('.apk'): raise Fault('Fel uppladdningstyp.', 409)
         if m['state'] == 'complete': return self.status(m)
         path = self.parts / (m['id'] + '.part')
         if path.stat().st_size != m['size']: raise Fault('APK-filen är inte fullständigt uppladdad.', 409)
         with path.open('rb') as file: actual = hashlib.file_digest(file, 'sha256').hexdigest()
         if actual != m['sha256']: raise Fault('Kontrollsumman stämmer inte. Välj rätt fil och försök igen.')
         package, code, name = self.inspector(path)
-        if (package, code, name) != (self.package, m['versionCode'], m['versionName']): raise Fault('APK:ns paketnamn eller version stämmer inte med metadata.')
+        if package != EXPECTED_PACKAGE or package != self.package: raise Fault('APK:ns paketnamn måste vara ' + EXPECTED_PACKAGE + '.')
+        if type(code) is not int or not 0 < code <= 2**31-1 or not isinstance(name, str) or not 0 < len(name.strip()) <= 100: raise Fault('APK:ns versionsuppgifter är ogiltiga.')
+        if 'versionCode' in m and (code, name) != (m['versionCode'], m['versionName']): raise Fault('APK:ns paketnamn eller version stämmer inte med metadata.')
         manifest = self.root / 'app-update.json'
         stable = self.root / 'rmlarm.apk'
-        # Preserve the previous manifest/APK pair across crashes between the two renames.
+        old = {}
         if manifest.exists():
-            old = json.loads(manifest.read_text())
-            if old.get('apkUrl') == APK_BASE + 'rmlarm.apk' and stable.exists():
-                with stable.open('rb') as file: old_hash = hashlib.file_digest(file, 'sha256').hexdigest()
-                old_name = 'rmlarm-' + old_hash + '.apk'
-                if not (self.root / old_name).exists(): os.link(stable, self.root / old_name)
-                atomic_json(manifest, dict(old, apkUrl=APK_BASE + old_name))
-        name = 'rmlarm-' + m['sha256'] + '.apk'
-        immutable = self.root / name
-        # Hard links do not duplicate the APK or consume a second file-size allocation.
-        if not immutable.exists(): os.link(path, immutable)
-        temporary = self.root / '.rmlarm.next'
+            try: old = json.loads(manifest.read_text())
+            except (ValueError, OSError): raise Fault('Nuvarande app-update.json kunde inte läsas. Publicerade filer är oförändrade.') from None
+            if not isinstance(old, dict): raise Fault('Nuvarande app-update.json har ogiltigt format. Publicerade filer är oförändrade.')
+        release = dict(old, versionCode=code, versionName=name, apkUrl=APK_BASE + 'rmlarm.apk')
+        if 'packageName' in old: release['packageName'] = package
+        if 'message' in m: release['message'] = m['message']
+        elif 'message' not in release: release['message'] = ''
+        # Prepare the entire JSON privately before touching either published file.
+        prepared = self.parts / (m['id'] + '.release.json')
+        atomic_json(prepared, release)
+        backups = []
+        for target in (stable, manifest):
+            backup = self.parts / (m['id'] + '.' + target.name + '.backup')
+            backup.unlink(missing_ok=True)
+            if target.exists(): os.link(target, backup)
+            backups.append((target, backup))
+        temporary = self.parts / (m['id'] + '.next.apk')
         temporary.unlink(missing_ok=True)
-        os.link(immutable, temporary)
-        os.replace(temporary, stable)
-        atomic_json(manifest, dict(versionCode=m['versionCode'], versionName=m['versionName'], message=m['message'], apkUrl=APK_BASE + name))
+        os.chmod(path, 0o644)
+        os.link(path, temporary)
+        try:
+            os.replace(temporary, stable)
+            os.replace(prepared, manifest)
+            fd = os.open(self.root, os.O_RDONLY)
+            try: os.fsync(fd)
+            finally: os.close(fd)
+        except OSError:
+            for target, backup in backups:
+                if backup.exists(): os.replace(backup, target)
+                else: target.unlink(missing_ok=True)
+            raise Fault('Publiceringen misslyckades. Föregående APK och app-update.json har återställts.', 503) from None
+        for _, backup in backups: backup.unlink(missing_ok=True)
+        m.update(versionCode=code, versionName=name, publication=dict(packageName=package, versionCode=code, versionName=name, apkUrl=release['apkUrl'], manifestUrl=APK_BASE + 'app-update.json'))
         m['state'] = 'complete'
         atomic_json(self.parts / (m['id'] + '.json'), m)
         path.unlink(missing_ok=True)

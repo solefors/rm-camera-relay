@@ -1,5 +1,5 @@
 name: RM APK och appuppdateringar
-version: "0.3.0"
+version: "0.4.0"
 slug: rm_apk_updates
 description: Admin-only resumable file and APK uploads to Home Assistant www/apk via ingress
 arch: [aarch64, amd64]
