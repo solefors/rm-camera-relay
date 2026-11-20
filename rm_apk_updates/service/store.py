@@ -91,11 +91,12 @@ class Store:
                 manifest = self.root / 'app-update.json'
                 if manifest.exists():
                     current = json.loads(manifest.read_text())
-                    if (current.get('apkUrl') == APK_BASE + 'rmlarm.apk'
+                    versioned = self.root / ('rmlarm-' + m['sha256'] + '.apk')
+                    if (current.get('apkUrl') == APK_BASE + versioned.name
                             and all(current.get(k) == m.get(k) for k in ('versionCode', 'versionName'))
                             and ('message' not in data or current.get('message') == data['message'])
-                            and (self.root / 'rmlarm.apk').exists()):
-                        with (self.root / 'rmlarm.apk').open('rb') as file:
+                            and versioned.exists()):
+                        with versioned.open('rb') as file:
                             if hashlib.file_digest(file, 'sha256').hexdigest() == m['sha256']: return self.status(m)
         if data['size'] > self.space(): raise Fault('Otillräckligt diskutrymme på Home Assistant.', 507)
         ident = str(uuid.uuid4())
@@ -167,12 +168,19 @@ class Store:
         if 'versionCode' in m and (code, name) != (m['versionCode'], m['versionName']): raise Fault('APK:ns paketnamn eller version stämmer inte med metadata.')
         manifest = self.root / 'app-update.json'
         stable = self.root / 'rmlarm.apk'
+        # HA static files are cached for 31 days; no-cache request headers do not
+        # invalidate Cloudflare's cached stable URL. Bind each manifest to exact bytes.
+        versioned = self.root / ('rmlarm-' + actual + '.apk')
+        if versioned.exists():
+            with versioned.open('rb') as file:
+                if hashlib.file_digest(file, 'sha256').hexdigest() != actual:
+                    raise Fault('Den oföränderliga versionsfilens kontrollsumma är fel. Publiceringen stoppades.', 409)
         old = {}
         if manifest.exists():
             try: old = json.loads(manifest.read_text())
             except (ValueError, OSError): raise Fault('Nuvarande app-update.json kunde inte läsas. Publicerade filer är oförändrade.') from None
             if not isinstance(old, dict): raise Fault('Nuvarande app-update.json har ogiltigt format. Publicerade filer är oförändrade.')
-        release = dict(old, versionCode=code, versionName=name, apkUrl=APK_BASE + 'rmlarm.apk')
+        release = dict(old, versionCode=code, versionName=name, apkUrl=APK_BASE + versioned.name)
         if 'packageName' in old: release['packageName'] = package
         if 'message' in m: release['message'] = m['message']
         elif 'message' not in release: release['message'] = ''
@@ -189,7 +197,11 @@ class Store:
         temporary.unlink(missing_ok=True)
         os.chmod(path, 0o644)
         os.link(path, temporary)
+        created_versioned = False
         try:
+            if not versioned.exists():
+                os.link(path, versioned)
+                created_versioned = True
             os.replace(temporary, stable)
             os.replace(prepared, manifest)
             fd = os.open(self.root, os.O_RDONLY)
@@ -199,6 +211,8 @@ class Store:
             for target, backup in backups:
                 if backup.exists(): os.replace(backup, target)
                 else: target.unlink(missing_ok=True)
+            if created_versioned: versioned.unlink(missing_ok=True)
+            temporary.unlink(missing_ok=True)
             raise Fault('Publiceringen misslyckades. Föregående APK och app-update.json har återställts.', 503) from None
         for _, backup in backups: backup.unlink(missing_ok=True)
         m.update(versionCode=code, versionName=name, publication=dict(packageName=package, versionCode=code, versionName=name, apkUrl=release['apkUrl'], manifestUrl=APK_BASE + 'app-update.json'))

@@ -44,7 +44,7 @@ class UploadTests(unittest.TestCase):
         self.assertEqual((self.root/'rmlarm.apk').read_bytes(),self.bytes)
         release=json.loads((self.root/'app-update.json').read_text())
         self.assertEqual(release['versionCode'],4)
-        self.assertEqual(release['apkUrl'],APK_BASE+'rmlarm.apk')
+        self.assertEqual(release['apkUrl'],APK_BASE+'rmlarm-'+self.data['sha256']+'.apk')
         self.assertEqual(release['versionName'],'1.0.3')
     def test_fixed_paths(self):
         with self.assertRaises(Fault): self.store.metadata('../../etc/passwd','admin')

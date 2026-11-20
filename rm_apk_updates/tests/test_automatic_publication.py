@@ -39,9 +39,10 @@ class AutomaticPublicationTests(unittest.TestCase):
         self.assertEqual(result['publication']['packageName'], 'com.example.rmdckentreprenadab')
         self.assertEqual(result['publication']['versionCode'], 4)
         self.assertEqual(result['publication']['versionName'], '1.0.3')
-        self.assertEqual(result['publication']['apkUrl'], 'https://ha.msdev.bid/local/apk/rmlarm.apk')
+        url = APK_BASE + 'rmlarm-' + hashlib.sha256(self.body).hexdigest() + '.apk'
+        self.assertEqual(result['publication']['apkUrl'], url)
         manifest = json.loads(self.store.root.joinpath('app-update.json').read_text())
-        self.assertEqual(manifest, dict(self.old, versionCode=4, versionName='1.0.3'))
+        self.assertEqual(manifest, dict(self.old, versionCode=4, versionName='1.0.3', apkUrl=url))
         self.assertEqual(self.store.root.joinpath('rmlarm.apk').read_bytes(), self.body)
         self.assertEqual(Store(self.store.root, EXPECTED_PACKAGE).status(
             self.store.metadata(result['id'], 'admin'))['publication'], result['publication'])
@@ -51,6 +52,35 @@ class AutomaticPublicationTests(unittest.TestCase):
         self.assertEqual(result['publication']['versionCode'], 4)
         self.assertFalse(self.store.root.joinpath('release-1.0.3.apk').exists())
         self.assertEqual(json.loads(self.store.root.joinpath('app-update.json').read_text())['versionCode'], 4)
+
+    def test_version_8_manifest_points_to_exact_immutable_apk_not_cached_version_7(self):
+        self.old.update(versionCode=7, versionName='1.0.6')
+        atomic_json(self.store.root / 'app-update.json', self.old)
+        self.store.inspector = lambda p: (EXPECTED_PACKAGE, 8, '1.0.7')
+        result = self.store.finish(self.upload())
+        url = result['publication']['apkUrl']
+        self.assertEqual(result['publication']['versionCode'], 8)
+        self.assertEqual(result['publication']['versionName'], '1.0.7')
+        self.assertEqual(url, APK_BASE + 'rmlarm-' + hashlib.sha256(self.body).hexdigest() + '.apk')
+        self.assertEqual(self.store.root.joinpath(url.rsplit('/', 1)[1]).read_bytes(), self.body)
+        self.assertEqual(json.loads(self.store.root.joinpath('app-update.json').read_text())['apkUrl'], url)
+
+    def test_existing_immutable_file_can_never_be_overwritten(self):
+        target = self.store.root / ('rmlarm-' + hashlib.sha256(self.body).hexdigest() + '.apk')
+        target.write_bytes(b'wrong-existing-file')
+        with self.assertRaises(Fault): self.store.finish(self.upload())
+        self.assertEqual(target.read_bytes(), b'wrong-existing-file')
+        self.assert_old()
+
+    def test_prior_immutable_version_survives_next_publication(self):
+        first = self.store.finish(self.upload())['publication']['apkUrl']
+        previous = self.body
+        self.body = b'next-verified-apk'
+        self.store.inspector = lambda p: (EXPECTED_PACKAGE, 8, '1.0.7')
+        second = self.store.finish(self.upload())['publication']['apkUrl']
+        self.assertNotEqual(first, second)
+        self.assertEqual(self.store.root.joinpath(first.rsplit('/', 1)[1]).read_bytes(), previous)
+        self.assertEqual(self.store.root.joinpath(second.rsplit('/', 1)[1]).read_bytes(), self.body)
 
     def test_wrong_package_keeps_both_published_files(self):
         m = self.upload(generic=True)
@@ -112,6 +142,7 @@ class AutomaticPublicationTests(unittest.TestCase):
         with patch('service.store.os.replace', side_effect=fail):
             with self.assertRaises(Fault): self.store.finish(m)
         self.assert_old()
+        self.assertFalse(self.store.root.joinpath('rmlarm-' + hashlib.sha256(self.body).hexdigest() + '.apk').exists())
         self.assertEqual(self.store.finish(m)['state'], 'complete')
 
     def test_bad_existing_manifest_is_not_overwritten(self):
